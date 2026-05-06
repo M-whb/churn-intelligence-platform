@@ -23,8 +23,7 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-
+BASE = r"C:\Users\wahba\churn_project"
 
 # CHARGEMENT (mis en cache)
 
@@ -40,12 +39,11 @@ def load_models():
 def load_scaler():
     return joblib.load(f'{BASE}/data/processed/scaler.pkl')
 
-@st.cache_data
 def load_data():
     X_test  = pd.read_csv(f'{BASE}/data/processed/X_test.csv')
-    y_test  = pd.read_csv(f'{BASE}/data/processed/y_test.csv').squeeze()
+    y_test  = pd.read_csv(f'{BASE}/data/processed/y_test.csv').iloc[:, 0]
     X_train = pd.read_csv(f'{BASE}/data/processed/X_train.csv')
-    y_train = pd.read_csv(f'{BASE}/data/processed/y_train.csv').squeeze()
+    y_train = pd.read_csv(f'{BASE}/data/processed/y_train.csv').iloc[:, 0]
     df_raw  = pd.read_csv(f'{BASE}/data/raw/customer_churn.csv')
     return X_test, y_test, X_train, y_train, df_raw
 
@@ -150,7 +148,7 @@ def build_feature_vector(
 
 # VUE D'ENSEMBLE
 
-if page == "Vue d'ensemble":
+if page == "🏠 Vue d'ensemble":
     st.title("Vue d'ensemble — Rétention Client")
     st.markdown("Plateforme décisionnelle de prédiction du churn et d'analyse du risque de revenus.")
 
@@ -224,7 +222,7 @@ if page == "Vue d'ensemble":
 
 # PERFORMANCE MODÈLES
 
-elif page == " Performance modèles":
+elif page == "📈 Performance modèles":
     st.title("Comparaison des performances")
 
     perf_data = {
@@ -292,7 +290,7 @@ elif page == " Performance modèles":
 
 # INTERPRÉTABILITÉ
 
-elif page == "Interprétabilité":
+elif page == "🔍 Interprétabilité":
     st.title("Interprétabilité des modèles")
 
     st.subheader("Feature Importance — Random Forest")
@@ -352,7 +350,7 @@ elif page == "Interprétabilité":
 
 # PRÉDICTION CLIENT
 
-elif page == "Prédiction client":
+elif page == "🎯 Prédiction client":
     st.title("Prédiction de churn — Client individuel")
     st.markdown("Renseignez les caractéristiques d'un client pour obtenir "
                 "sa probabilité de churn en temps réel.")
