@@ -1,0 +1,34 @@
+# Environnement virtuel
+venv/
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# Données brutes (trop lourdes pour Git)
+data/raw/
+
+# Modèles (lourds — optionnel de les exclure)
+# models/
+
+# Fichiers système
+.DS_Store
+Thumbs.db
+
+# VS Code
+.vscode/
+
+# Logs
+*.log
+uvicorn.log
