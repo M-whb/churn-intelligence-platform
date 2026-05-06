@@ -7,14 +7,15 @@ import joblib
 import shap
 import plotly.express as px
 import plotly.graph_objects as go
-from sklearn.metrics import (roc_curve, auc, confusion_matrix,
-                              classification_report)
-import warnings, os
+from sklearn.metrics import roc_curve, auc, confusion_matrix
+import warnings
+import os
+
 warnings.filterwarnings('ignore')
 
-# ============================================================
-# CONFIGURATION PAGE
-# ============================================================
+
+# CONFIG
+
 st.set_page_config(
     page_title="Churn Intelligence Platform",
     page_icon="📊",
@@ -22,79 +23,153 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ============================================================
-# CHARGEMENT DES MODÈLES ET DONNÉES (mis en cache)
-# ============================================================
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+# CHARGEMENT (mis en cache)
+
 @st.cache_resource
 def load_models():
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    models = {
-        'Régression Logistique': joblib.load(f'{base}/models/logistic_regression.pkl'),
-        'Random Forest':         joblib.load(f'{base}/models/random_forest.pkl'),
-        'XGBoost':               joblib.load(f'{base}/models/xgboost.pkl'),
+    return {
+        'Régression Logistique': joblib.load(f'{BASE}/models/logistic_regression.pkl'),
+        'Random Forest':         joblib.load(f'{BASE}/models/random_forest.pkl'),
+        'XGBoost':               joblib.load(f'{BASE}/models/xgboost.pkl'),
     }
-    scaler = joblib.load(f'{base}/data/processed/scaler.pkl')
-    return models, scaler
+
+@st.cache_resource
+def load_scaler():
+    return joblib.load(f'{BASE}/data/processed/scaler.pkl')
 
 @st.cache_data
 def load_data():
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    X_test  = pd.read_csv(f'{base}/data/processed/X_test.csv')
-    y_test  = pd.read_csv(f'{base}/data/processed/y_test.csv').squeeze()
-    X_train = pd.read_csv(f'{base}/data/processed/X_train.csv')
-    y_train = pd.read_csv(f'{base}/data/processed/y_train.csv').squeeze()
-    df_raw  = pd.read_csv(f'{base}/data/raw/customer_churn.csv')
+    X_test  = pd.read_csv(f'{BASE}/data/processed/X_test.csv')
+    y_test  = pd.read_csv(f'{BASE}/data/processed/y_test.csv').squeeze()
+    X_train = pd.read_csv(f'{BASE}/data/processed/X_train.csv')
+    y_train = pd.read_csv(f'{BASE}/data/processed/y_train.csv').squeeze()
+    df_raw  = pd.read_csv(f'{BASE}/data/raw/customer_churn.csv')
     return X_test, y_test, X_train, y_train, df_raw
 
-models, scaler = load_models()
+models  = load_models()
+scaler  = load_scaler()
 X_test, y_test, X_train, y_train, df_raw = load_data()
+FEATURE_COLS = X_train.columns.tolist()
 
-# ============================================================
-# SIDEBAR — Navigation
-# ============================================================
+
+# SIDEBAR
+
 st.sidebar.title("📊 Churn Intelligence")
 st.sidebar.markdown("---")
 page = st.sidebar.radio(
     "Navigation",
-    ["🏠 Vue d'ensemble", "📈 Performance modèles",
-     "🔍 Interprétabilité", "🎯 Prédiction client"]
+    ["🏠 Vue d'ensemble",
+     "📈 Performance modèles",
+     "🔍 Interprétabilité",
+     "🎯 Prédiction client"]
 )
 st.sidebar.markdown("---")
-model_choice = st.sidebar.selectbox(
+model_choice  = st.sidebar.selectbox(
     "Modèle actif",
     list(models.keys()),
-    index=1  # Random Forest par défaut
+    index=1
 )
 active_model = models[model_choice]
 
-# ============================================================
-# PAGE 1 — VUE D'ENSEMBLE
-# ============================================================
-if page == "🏠 Vue d'ensemble":
-    st.title("🏠 Vue d'ensemble — Rétention Client")
+
+# Préparer un vecteur de features à partir des saisies
+
+def build_feature_vector(
+    tenure_months, monthly_logins, csat_score, nps_score,
+    monthly_fee, total_revenue, payment_failures,
+    weekly_active_days, avg_session_time, support_tickets,
+    last_login_days, gender, customer_segment, signup_channel,
+    contract_type, payment_method, discount_applied,
+    price_increase_last_3m, complaint_type, survey_response
+):
+    """Construit et scale un vecteur de features aligné sur X_train."""
+
+    # Vecteur à zéro aligné sur les colonnes d'entraînement
+    row = pd.DataFrame(0.0, index=[0], columns=FEATURE_COLS)
+
+    # Variables numériques 
+    num = {
+        'tenure_months':        tenure_months,
+        'monthly_logins':       monthly_logins,
+        'csat_score':           csat_score,
+        'nps_score':            nps_score,
+        'monthly_fee':          monthly_fee,
+        'total_revenue':        total_revenue,
+        'payment_failures':     payment_failures,
+        'weekly_active_days':   weekly_active_days,
+        'avg_session_time':     avg_session_time,
+        'support_tickets':      support_tickets,
+        'last_login_days_ago':  last_login_days,
+        # features engineerées
+        'login_per_month':      monthly_logins / (tenure_months + 1),
+        'payment_risk':         payment_failures * monthly_fee,
+        'recency_risk':         last_login_days / (avg_session_time + 1),
+        # valeurs par défaut pour colonnes non saisies
+        'age':                  35,
+        'features_used':        3,
+        'usage_growth_rate':    0.0,
+        'avg_resolution_time':  0.0,
+        'escalations':          0,
+        'email_open_rate':      0.5,
+        'marketing_click_rate': 0.25,
+        'referral_count':       0,
+    }
+    for col, val in num.items():
+        if col in row.columns:
+            row[col] = float(val)
+
+    # Encodage OHE 
+    # Pour chaque variable catégorielle, on active la colonne
+    # correspondant à la modalité saisie (si elle existe dans X_train)
+    ohe = {
+        'gender':                 gender,
+        'customer_segment':       customer_segment,
+        'signup_channel':         signup_channel,
+        'contract_type':          contract_type,
+        'payment_method':         payment_method,
+        'discount_applied':       discount_applied,
+        'price_increase_last_3m': price_increase_last_3m,
+        'complaint_type':         complaint_type,
+        'survey_response':        survey_response,
+    }
+    for orig, val in ohe.items():
+        col_name = f"{orig}_{val}"
+        if col_name in row.columns:
+            row[col_name] = 1.0
+
+    # Normalisation 
+    row_scaled = pd.DataFrame(
+        scaler.transform(row),
+        columns=FEATURE_COLS
+    )
+    return row_scaled
+
+
+# VUE D'ENSEMBLE
+
+if page == "Vue d'ensemble":
+    st.title("Vue d'ensemble — Rétention Client")
     st.markdown("Plateforme décisionnelle de prédiction du churn et d'analyse du risque de revenus.")
 
-    # KPI Cards
     y_pred_all  = active_model.predict(X_test)
     y_proba_all = active_model.predict_proba(X_test)[:, 1]
     n_churn     = int(y_pred_all.sum())
-    df_raw_copy = df_raw.copy()
-    mean_monthly_fee = df_raw_copy['monthly_fee'].mean()
-    revenue_at_risk  = round(n_churn * mean_monthly_fee, 0)
+    mean_fee    = df_raw['monthly_fee'].mean()
+    revenue_risk = round(n_churn * mean_fee, 0)
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Clients analysés",    f"{len(X_test):,}")
-    col2.metric("Clients à risque",    f"{n_churn:,}",
-                f"{n_churn/len(X_test)*100:.1f}% du portefeuille")
-    col3.metric("Revenu mensuel à risque",
-                f"{revenue_at_risk:,.0f} €",
-                "Estimation conservatrice")
-    col4.metric("Modèle actif", model_choice.split()[0] + "...",
-                "Changer dans la barre latérale")
+    # KPIs
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Clients analysés",       f"{len(X_test):,}")
+    c2.metric("Clients à risque",       f"{n_churn:,}",
+              f"{n_churn/len(X_test)*100:.1f}% du portefeuille")
+    c3.metric("Revenu mensuel à risque", f"{revenue_risk:,.0f} €")
+    c4.metric("Modèle actif", model_choice.split()[0] + "...",
+              "Changer dans la barre latérale")
 
     st.markdown("---")
-
-    # Distribution du churn dans les données brutes
     col_a, col_b = st.columns(2)
 
     with col_a:
@@ -107,7 +182,7 @@ if page == "🏠 Vue d'ensemble":
             hole=0.4
         )
         fig.update_traces(textposition='outside', textinfo='percent+label')
-        fig.update_layout(showlegend=False, height=300, margin=dict(t=20,b=20))
+        fig.update_layout(showlegend=False, height=300, margin=dict(t=20, b=20))
         st.plotly_chart(fig, use_container_width=True)
 
     with col_b:
@@ -121,124 +196,105 @@ if page == "🏠 Vue d'ensemble":
             labels={'x': 'Type de contrat', 'y': 'Taux de churn (%)'}
         )
         fig2.update_layout(showlegend=False, height=300,
-                           coloraxis_showscale=False, margin=dict(t=20,b=20))
+                           coloraxis_showscale=False, margin=dict(t=20, b=20))
         st.plotly_chart(fig2, use_container_width=True)
 
-    # Distribution des probabilités prédites
-    st.subheader("Distribution des probabilités de churn prédites")
+    st.subheader("Distribution des probabilités prédites")
     fig3 = px.histogram(
-        x=y_proba_all,
-        nbins=50,
+        x=y_proba_all, nbins=50,
         color_discrete_sequence=['#7B1FA2'],
         labels={'x': 'Probabilité de churn', 'y': 'Nombre de clients'}
     )
     fig3.add_vline(x=0.5, line_dash='dash', line_color='red',
                    annotation_text='Seuil 0.5')
-    fig3.update_layout(height=300, margin=dict(t=20,b=20))
+    fig3.update_layout(height=280, margin=dict(t=20, b=20))
     st.plotly_chart(fig3, use_container_width=True)
 
-    # Top clients à risque
-    st.subheader("Top 10 clients à risque les plus élevé")
+    st.subheader("Top 10 clients à risque")
     risk_df = X_test.copy()
     risk_df['proba_churn'] = y_proba_all
     risk_df['prediction']  = y_pred_all
-    risk_df['vrai_label']  = y_test.values
     top_risk = risk_df.nlargest(10, 'proba_churn')[
         ['proba_churn', 'csat_score', 'tenure_months',
          'monthly_logins', 'payment_failures']
     ].round(3)
-    top_risk['proba_churn'] = top_risk['proba_churn'].apply(
-        lambda x: f"{x*100:.1f}%"
-    )
+    top_risk['proba_churn'] = top_risk['proba_churn'].apply(lambda x: f"{x*100:.1f}%")
     st.dataframe(top_risk, use_container_width=True)
 
-# ============================================================
-# PAGE 2 — PERFORMANCE MODÈLES
-# ============================================================
-elif page == "📈 Performance modèles":
-    st.title("📈 Comparaison des performances")
 
-    # Tableau comparatif
+# PERFORMANCE MODÈLES
+
+elif page == " Performance modèles":
+    st.title("Comparaison des performances")
+
     perf_data = {
-        'Modèle':     ['Régression Logistique', 'Random Forest', 'XGBoost', 'MLP'],
-        'Accuracy':   [0.6895, 0.8310, 0.8160, 0.7575],
-        'Precision':  [0.1983, 0.2781, 0.2657, 0.2384],
-        'Recall':     [0.6716, 0.4118, 0.4559, 0.6275],
-        'F1-Score':   [0.3061, 0.3320, 0.3357, 0.3455],
-        'ROC-AUC':    [0.7510, 0.7908, 0.7728, 0.7554],
+        'Modèle':    ['Régression Logistique', 'Random Forest', 'XGBoost', 'MLP'],
+        'Accuracy':  [0.6895, 0.8310, 0.8160, 0.7575],
+        'Precision': [0.1983, 0.2781, 0.2657, 0.2384],
+        'Recall':    [0.6716, 0.4118, 0.4559, 0.6275],
+        'F1-Score':  [0.3061, 0.3320, 0.3357, 0.3455],
+        'ROC-AUC':   [0.7510, 0.7908, 0.7728, 0.7554],
     }
     df_perf = pd.DataFrame(perf_data).set_index('Modèle')
 
-    st.subheader("Tableau comparatif — toutes métriques")
+    st.subheader("Tableau comparatif")
     st.dataframe(
-        df_perf.style.highlight_max(axis=0, color='#C8E6C9')
-                     .highlight_min(axis=0, color='#FFCDD2')
-                     .format("{:.4f}"),
+        df_perf.style
+               .highlight_max(axis=0, color='#C8E6C9')
+               .highlight_min(axis=0, color='#FFCDD2')
+               .format("{:.4f}"),
         use_container_width=True
     )
+    st.caption("Vert = meilleur score | Rouge = score le plus faible")
 
-    st.markdown("""
-    > Vert = meilleur score | Rouge = score le plus faible pour cette métrique.
-    > Le Random Forest domine sur ROC-AUC. Le MLP a le meilleur F1. 
-    > La Régression Logistique a le meilleur Recall — utile si on veut minimiser les faux négatifs.
-    """)
-
-    # Courbes ROC
-    st.subheader("Courbes ROC — comparaison")
+    st.subheader("Courbes ROC")
     fig_roc = go.Figure()
-    colors_roc = ['#2196F3', '#4CAF50', '#FF9800', '#9C27B0']
-
-    for (name, model), color in zip(models.items(), colors_roc):
-        y_proba = model.predict_proba(X_test)[:, 1]
-        fpr, tpr, _ = roc_curve(y_test, y_proba)
-        auc_score   = auc(fpr, tpr)
+    colors  = ['#2196F3', '#4CAF50', '#FF9800', '#9C27B0']
+    for (name, model), color in zip(models.items(), colors):
+        yp   = model.predict_proba(X_test)[:, 1]
+        fpr, tpr, _ = roc_curve(y_test, yp)
         fig_roc.add_trace(go.Scatter(
             x=fpr, y=tpr, mode='lines',
-            name=f"{name} (AUC={auc_score:.3f})",
+            name=f"{name} (AUC={auc(fpr,tpr):.3f})",
             line=dict(color=color, width=2)
         ))
-
     fig_roc.add_trace(go.Scatter(
-        x=[0,1], y=[0,1], mode='lines',
-        name='Baseline (AUC=0.5)',
-        line=dict(color='gray', dash='dash')
+        x=[0, 1], y=[0, 1], mode='lines',
+        name='Baseline', line=dict(color='gray', dash='dash')
     ))
     fig_roc.update_layout(
         xaxis_title='Taux de faux positifs',
-        yaxis_title='Taux de vrais positifs (Recall)',
-        height=450, margin=dict(t=20)
+        yaxis_title='Recall (vrais positifs)',
+        height=420, margin=dict(t=20)
     )
     st.plotly_chart(fig_roc, use_container_width=True)
 
-    # Matrice de confusion du modèle actif
     st.subheader(f"Matrice de confusion — {model_choice}")
     y_pred = active_model.predict(X_test)
     cm = confusion_matrix(y_test, y_pred)
-
     fig_cm, ax = plt.subplots(figsize=(5, 4))
     sns.heatmap(cm, annot=True, fmt='d', cmap='Blues',
                 xticklabels=['Non-Churn', 'Churn'],
                 yticklabels=['Non-Churn', 'Churn'], ax=ax)
     ax.set_xlabel('Prédit')
     ax.set_ylabel('Réel')
-    ax.set_title(f'Matrice de confusion — {model_choice}')
     st.pyplot(fig_cm)
 
     tn, fp, fn, tp = cm.ravel()
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Vrais Positifs (churners détectés)", tp)
-    col2.metric("Faux Négatifs (churners ratés)", fn,
-                delta=f"-{fn} clients perdus", delta_color="inverse")
-    col3.metric("Vrais Négatifs", tn)
-    col4.metric("Faux Positifs", fp)
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Vrais Positifs (churners détectés)", tp)
+    c2.metric("Faux Négatifs (churners ratés)", fn,
+              delta=f"-{fn}", delta_color="inverse")
+    c3.metric("Vrais Négatifs", tn)
+    c4.metric("Faux Positifs", fp)
 
-# ============================================================
-# PAGE 3 — INTERPRÉTABILITÉ
-# ============================================================
-elif page == "🔍 Interprétabilité":
-    st.title("🔍 Interprétabilité des modèles")
 
-    # Feature Importance Random Forest
+
+# INTERPRÉTABILITÉ
+
+elif page == "Interprétabilité":
+    st.title("Interprétabilité des modèles")
+
     st.subheader("Feature Importance — Random Forest")
     rf_model = models['Random Forest']
     feat_imp = pd.Series(
@@ -247,8 +303,7 @@ elif page == "🔍 Interprétabilité":
     ).sort_values(ascending=False).head(15)
 
     fig_fi = px.bar(
-        x=feat_imp.values,
-        y=feat_imp.index,
+        x=feat_imp.values, y=feat_imp.index,
         orientation='h',
         color=feat_imp.values,
         color_continuous_scale=['#B5D4F4', '#0C447C'],
@@ -256,74 +311,77 @@ elif page == "🔍 Interprétabilité":
     )
     fig_fi.update_layout(
         yaxis={'categoryorder': 'total ascending'},
-        height=500, coloraxis_showscale=False,
-        margin=dict(t=20)
+        height=500, coloraxis_showscale=False, margin=dict(t=20)
     )
     st.plotly_chart(fig_fi, use_container_width=True)
+    st.info("**csat_score** est la variable la plus déterminante (0,159). "
+            "**login_per_month** (feature engineerée) se place en 3e position, "
+            "devant **monthly_logins** brut — ce qui valide le feature engineering.")
 
-    st.info("""
-    **Lecture :** `csat_score` est la variable la plus déterminante (score de satisfaction client).
-    `tenure_months` (ancienneté) et `login_per_month` (engagement normalisé) suivent.
-    `payment_failures` confirme que les échecs de paiement sont un signal critique de résiliation.
-    """)
-
-    # SHAP
     st.subheader("Analyse SHAP — XGBoost")
     st.markdown("""
-    SHAP permet d'expliquer **pourquoi** le modèle produit chaque prédiction.
-    - Une valeur SHAP positive pousse vers le churn
-    - Une valeur SHAP négative réduit le risque de churn
+    SHAP explique **pourquoi** le modèle produit chaque prédiction.
+    - Valeur SHAP positive → pousse vers le churn
+    - Valeur SHAP négative → réduit le risque de churn
     """)
 
-    with st.spinner("Calcul des valeurs SHAP en cours..."):
-        xgb_model  = models['XGBoost']
+    with st.spinner("Calcul des valeurs SHAP..."):
+        xgb_model = models['XGBoost']
         explainer  = shap.TreeExplainer(xgb_model)
         sample     = X_test.sample(300, random_state=42)
         shap_vals  = explainer.shap_values(sample)
 
-    fig_shap, ax = plt.subplots(figsize=(10, 7))
+    fig_bar, ax1 = plt.subplots(figsize=(10, 6))
     shap.summary_plot(shap_vals, sample, plot_type='bar',
                       max_display=15, show=False)
     plt.title("SHAP — Importance globale (XGBoost)", fontweight='bold')
     plt.tight_layout()
-    st.pyplot(fig_shap)
+    st.pyplot(fig_bar)
 
-    fig_bee, ax2 = plt.subplots(figsize=(10, 7))
+    fig_bee, ax2 = plt.subplots(figsize=(10, 6))
     shap.summary_plot(shap_vals, sample, plot_type='dot',
                       max_display=12, show=False)
     plt.title("SHAP — Direction des effets", fontweight='bold')
     plt.tight_layout()
     st.pyplot(fig_bee)
 
-    st.info("""
-    **Lecture du beeswarm :**
-    - Points rouges (valeur élevée) à gauche = cette feature élevée réduit le churn
-    - Points rouges à droite = cette feature élevée augmente le churn
-    Par exemple : `csat_score` élevé (rouge) à gauche → satisfaction élevée protège contre le churn.
-    """)
+    st.info("**Lecture :** Un csat_score élevé (rouge) à gauche réduit le risque de churn. "
+            "Des payment_failures élevés (rouge) à droite augmentent le risque.")
 
-# ============================================================
-# PAGE 4 — PRÉDICTION CLIENT EN TEMPS RÉEL
-# ============================================================
-elif page == "🎯 Prédiction client":
-    st.title("🎯 Prédiction de churn — Client individuel")
-    st.markdown("Renseignez les caractéristiques d'un client pour obtenir sa probabilité de churn.")
+
+
+# PRÉDICTION CLIENT
+
+elif page == "Prédiction client":
+    st.title("Prédiction de churn — Client individuel")
+    st.markdown("Renseignez les caractéristiques d'un client pour obtenir "
+                "sa probabilité de churn en temps réel.")
 
     col1, col2, col3 = st.columns(3)
 
     with col1:
         st.subheader("Profil client")
-        tenure_months   = st.slider("Ancienneté (mois)", 1, 72, 12)
-        monthly_logins  = st.slider("Connexions mensuelles", 0, 40, 10)
-        csat_score      = st.slider("Score satisfaction (CSAT)", 1.0, 5.0, 3.0, 0.5)
-        nps_score       = st.slider("NPS Score", -100, 100, 0)
+        tenure_months  = st.slider("Ancienneté (mois)", 1, 72, 12)
+        monthly_logins = st.slider("Connexions mensuelles", 0, 40, 10)
+        csat_score     = st.slider("Score satisfaction (CSAT)", 1.0, 5.0, 3.0, 0.5)
+        nps_score      = st.slider("NPS Score", -100, 100, 0)
+        gender         = st.selectbox("Genre", ["Male", "Female"])
+        customer_segment = st.selectbox("Segment client",
+                                        ["Individual", "SME", "Enterprise"])
 
     with col2:
         st.subheader("Données financières")
-        monthly_fee      = st.selectbox("Frais mensuels (€)", [10,20,30,50,75,100,150], index=2)
+        monthly_fee      = st.selectbox("Frais mensuels (€)",
+                                        [10, 20, 30, 50, 75, 100, 150], index=2)
         total_revenue    = st.number_input("Revenu total (€)", 10, 5000, 360)
         payment_failures = st.slider("Échecs de paiement", 0, 5, 0)
-        contract_type    = st.selectbox("Type de contrat", ['Monthly','Yearly','Two-Year'])
+        contract_type    = st.selectbox("Type de contrat",
+                                        ["Monthly", "Yearly", "Two-Year"])
+        payment_method   = st.selectbox("Moyen de paiement",
+                                        ["Card", "PayPal", "BankTransfer"])
+        discount_applied = st.selectbox("Remise appliquée", ["No", "Yes"])
+        price_increase_last_3m = st.selectbox("Hausse tarifaire récente (3 mois)",
+                                              ["No", "Yes"])
 
     with col3:
         st.subheader("Comportement")
@@ -331,87 +389,114 @@ elif page == "🎯 Prédiction client":
         avg_session_time   = st.slider("Durée session moy. (min)", 1.0, 30.0, 15.0)
         support_tickets    = st.slider("Tickets support", 0, 5, 1)
         last_login_days    = st.slider("Dernière connexion (jours)", 0, 30, 5)
+        signup_channel     = st.selectbox("Canal d'inscription",
+                                          ["Web", "Mobile", "Partner"])
+        complaint_type     = st.selectbox("Type de plainte",
+                                          ["No_complaint", "Billing",
+                                           "Technical", "Service"])
+        survey_response    = st.selectbox("Réponse enquête",
+                                          ["Neutral", "Satisfied", "Unsatisfied"])
 
     if st.button("🔮 Calculer la probabilité de churn", type="primary"):
-        # Construction d'un vecteur de features aligné sur X_train
-        template = pd.DataFrame(0, index=[0], columns=X_train.columns)
 
-        # Remplissage des valeurs numériques
-        num_vals = {
-            'tenure_months': tenure_months,
-            'monthly_logins': monthly_logins,
-            'csat_score': csat_score,
-            'nps_score': nps_score,
-            'monthly_fee': monthly_fee,
-            'total_revenue': total_revenue,
-            'payment_failures': payment_failures,
-            'weekly_active_days': weekly_active_days,
-            'avg_session_time': avg_session_time,
-            'support_tickets': support_tickets,
-            'last_login_days_ago': last_login_days,
-            'login_per_month': monthly_logins / (tenure_months + 1),
-            'payment_risk': payment_failures * monthly_fee,
-            'recency_risk': last_login_days / (avg_session_time + 1),
-        }
-        for col, val in num_vals.items():
-            if col in template.columns:
-                template[col] = val
+        # Construction du vecteur features 
+        row_scaled = build_feature_vector(
+            tenure_months, monthly_logins, csat_score, nps_score,
+            monthly_fee, total_revenue, payment_failures,
+            weekly_active_days, avg_session_time, support_tickets,
+            last_login_days, gender, customer_segment, signup_channel,
+            contract_type, payment_method, discount_applied,
+            price_increase_last_3m, complaint_type, survey_response
+        )
 
-        # Encodage contrat
-        if 'contract_type_Monthly' in template.columns and contract_type == 'Monthly':
-            template['contract_type_Monthly'] = 1
-        if 'contract_type_Yearly' in template.columns and contract_type == 'Yearly':
-            template['contract_type_Yearly'] = 1
-
-        # Prédiction avec le modèle actif
-        proba = active_model.predict_proba(template)[0][1]
+        # Prédiction 
+        proba = active_model.predict_proba(row_scaled)[0][1]
         pred  = int(proba >= 0.5)
 
-        # Affichage du résultat
         st.markdown("---")
-        if pred == 1:
-            st.error(f"⚠️ Client à HAUT RISQUE de churn — Probabilité : **{proba*100:.1f}%**")
-        elif proba >= 0.3:
-            st.warning(f"🟡 Risque MODÉRÉ de churn — Probabilité : **{proba*100:.1f}%**")
-        else:
-            st.success(f"✅ Risque FAIBLE de churn — Probabilité : **{proba*100:.1f}%**")
 
-        # Jauge visuelle
+        # Résultat textuel 
+        if pred == 1:
+            st.error(f" Client à HAUT RISQUE de churn — "
+                     f"Probabilité : **{proba*100:.1f}%**")
+        elif proba >= 0.3:
+            st.warning(f" Risque MODÉRÉ de churn — "
+                       f"Probabilité : **{proba*100:.1f}%**")
+        else:
+            st.success(f" Risque FAIBLE de churn — "
+                       f"Probabilité : **{proba*100:.1f}%**")
+
+        # Jauge 
+        gauge_color = ("#E53935" if proba > 0.5
+                       else "#FF9800" if proba > 0.3
+                       else "#4CAF50")
         fig_gauge = go.Figure(go.Indicator(
             mode="gauge+number+delta",
             value=round(proba * 100, 1),
-            delta={'reference': 10.2, 'suffix': '% (moyenne)'},
+            delta={'reference': 10.2, 'suffix': '% (moy.)'},
             gauge={
                 'axis': {'range': [0, 100]},
-                'bar': {'color': "#E53935" if proba > 0.5 else
-                                 "#FF9800" if proba > 0.3 else "#4CAF50"},
+                'bar':  {'color': gauge_color},
                 'steps': [
-                    {'range': [0, 30],  'color': '#E8F5E9'},
-                    {'range': [30, 50], 'color': '#FFF3E0'},
-                    {'range': [50, 100],'color': '#FFEBEE'}
+                    {'range': [0,  30],  'color': '#E8F5E9'},
+                    {'range': [30, 50],  'color': '#FFF3E0'},
+                    {'range': [50, 100], 'color': '#FFEBEE'},
                 ],
-                'threshold': {'line': {'color': 'red', 'width': 4},
-                              'thickness': 0.75, 'value': 50}
+                'threshold': {
+                    'line':      {'color': 'red', 'width': 4},
+                    'thickness': 0.75,
+                    'value':     50
+                }
             },
             title={'text': "Probabilité de churn (%)"}
         ))
         fig_gauge.update_layout(height=300)
         st.plotly_chart(fig_gauge, use_container_width=True)
 
-        # Recommandations
-        st.subheader("💡 Recommandations")
-        rec = []
+        #  Détail des features engineerées 
+        with st.expander("Détail des features calculées"):
+            st.write({
+                'login_per_month':
+                    round(monthly_logins / (tenure_months + 1), 3),
+                'payment_risk':
+                    round(payment_failures * monthly_fee, 2),
+                'recency_risk':
+                    round(last_login_days / (avg_session_time + 1), 3),
+            })
+
+        # Recommandations 
+        st.subheader("Recommandations")
+        recs = []
         if payment_failures > 0:
-            rec.append("🔴 Echecs de paiement détectés — Contacter le client pour régulariser la situation.")
-        if csat_score < 3:
-            rec.append("🔴 Satisfaction client faible — Proposer un appel de suivi ou un geste commercial.")
+            recs.append("Échecs de paiement détectés — "
+                        "Contacter le client pour régulariser la situation.")
+        if csat_score < 3.0:
+            recs.append("Satisfaction client faible (CSAT < 3) — "
+                        "Proposer un appel de suivi ou un geste commercial.")
         if tenure_months < 6:
-            rec.append("🟡 Client récent (< 6 mois) — Renforcer l'onboarding et l'accompagnement.")
+            recs.append("Client récent (< 6 mois) — "
+                        "Renforcer l'onboarding et l'accompagnement.")
         if monthly_logins < 5:
-            rec.append("🟡 Engagement faible — Envoyer une campagne de réengagement personnalisée.")
+            recs.append("Engagement faible — "
+                        "Lancer une campagne de réengagement personnalisée.")
         if last_login_days > 14:
-            rec.append("🟡 Inactivité récente — Relancer avec une offre exclusive.")
-        if not rec:
-            rec.append("✅ Profil stable — Maintenir la relation et surveiller l'évolution du CSAT.")
-        for r in rec:
+            recs.append("Inactivité récente — "
+                        "Relancer avec une offre exclusive.")
+        if survey_response == "Unsatisfied":
+            recs.append("Enquête négative — "
+                        "Escalader au service client en priorité.")
+        if contract_type == "Monthly" and proba > 0.3:
+            recs.append("Contrat mensuel sans engagement — "
+                        "Proposer une offre annuelle avec remise.")
+        if not recs:
+            recs.append("Profil stable — "
+                        "Maintenir la relation et surveiller l'évolution du CSAT.")
+        for r in recs:
             st.markdown(r)
+
+        # Revenu à risque 
+        st.markdown("---")
+        rev_risk = round(monthly_fee * proba, 2)
+        st.metric("Revenu mensuel à risque pour ce client",
+                  f"{rev_risk} €",
+                  f"{proba*100:.1f}% × {monthly_fee} €/mois")
