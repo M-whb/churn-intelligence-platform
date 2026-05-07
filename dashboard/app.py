@@ -497,4 +497,8 @@ elif page == "🎯 Prédiction client":
         rev_risk = round(monthly_fee * proba, 2)
         st.metric("Revenu mensuel à risque pour ce client",
                   f"{rev_risk} €",
+<<<<<<< HEAD
                   f"{proba*100:.1f}% × {monthly_fee} €/mois")
+=======
+                  f"{proba*100:.1f}% × {monthly_fee} €/mois")
+>>>>>>> 7350429 (Refonte du dashboard et nettoyage des notebooks)
